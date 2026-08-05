@@ -1,81 +1,65 @@
 import os
-import webbrowser
-import traceback
-from datetime import datetime
 import time
+import traceback
+import webbrowser
+from datetime import datetime
+
 import pandas as pd
-from pathlib import Path
-status="PASS"
-error_message=""
-start_time=time.time()
-provider_id="N/A"
-job_id="N/A"
-cert_df=pd.DataFrame()
-
-try:
-
-    import pyodbc
-    import pandas as pd
-    import time
-
-    # ==========================================
-    # DATABASE CONNECTION
-    # ==========================================
-
-    conn = pyodbc.connect(
-          "DRIVER={ODBC Driver 17 for SQL Server};"
-          "SERVER=tcp:54.202.110.163,1433;"
-          "DATABASE=Atlas;"
-          "UID=atlas;"
-          "PWD=!atlas!!*;"
-          "Encrypt=yes;"
-          "TrustServerCertificate=yes;"
-          "MARS_Connection=yes;"
-          "Pooling=no;",
-          timeout=30
-      )
-
-    cursor = conn.cursor()
-
-    # ==========================================
-    # USER INPUT
-    # ==========================================
+import pyodbc
 
 
-    provider_name = "FDA Debarment"
-    procedure_name = "FDADebarment"
+# ==========================================================
+# CONFIGURATION
+# ==========================================================
 
-    # ==========================================
-    # GET PROVIDER ID
-    # ==========================================
+SERVER = "tcp:54.202.110.163,1433"
+DATABASE = "Atlas"
+USERNAME = "atlas;"
+PASSWORD = "!atlas!!*;"
+
+
+
+PROVIDER_NAME = "New Hampshire: Exclusions"
+PROCEDURE_NAME = "NewHampshireExclusions"
+
+# provider_name = "FDA Debarment"
+# procedure_name = "FDADebarment"
+
+
+status = "PASS"
+error_message = ""
+provider_id = "N/A"
+job_id = "N/A"
+cert_df = pd.DataFrame()
+
+
+# ==========================================================
+# DATABASE
+# ==========================================================
+def get_provider(conn, provider_name):
 
     provider_df = pd.read_sql("""
-    SELECT TOP 1
-           Id,
-           Name,
-           PersistentId
-    FROM CertificationProviders
-    WHERE LOWER(Name) LIKE LOWER(?)
+        SELECT TOP 1
+            Id,
+            Name,
+            PersistentId
+        FROM CertificationProviders
+        WHERE LOWER(Name) LIKE LOWER(?)
     """, conn, params=[f"%{provider_name}%"])
 
     if provider_df.empty:
         raise Exception(f"{provider_name} not found")
 
     provider_id = int(provider_df.iloc[0]["Id"])
-    persistent_id = provider_df.iloc[0]["PersistentId"]
 
-    print("=" * 80)
-    print("PROVIDER DETAILS")
-    print(provider_df)
-
-    # ==========================================
-    # GET JOB ID
-    # ==========================================
+    return provider_id, provider_df 
+def get_job(conn, procedure_name):
 
     job_df = pd.read_sql("""
-    SELECT TOP 1 *
-    FROM CertificationProviderJobs
-    WHERE LOWER(ProcedureName) LIKE LOWER(?)
+        SELECT TOP 1
+            *
+        FROM CertificationProviderJobs
+        WHERE LOWER(ProcedureName) LIKE LOWER(?)
     """, conn, params=[f"%{procedure_name}%"])
 
     if job_df.empty:
@@ -83,222 +67,265 @@ try:
 
     job_id = int(job_df.iloc[0]["Id"])
 
-    print("=" * 80)
-    print("JOB DETAILS")
-    print(job_df.head(1))
+    return job_id, job_df
+def connect_database():
 
-    # ==========================================
-    # DELETE OLD DATA
-    # ==========================================
+    try:
+        conn = pyodbc.connect(
+            f"DRIVER={{ODBC Driver 17 for SQL Server}};"
+            f"SERVER={SERVER};"
+            f"DATABASE={DATABASE};"
+            f"UID={USERNAME};"
+            f"PWD={PASSWORD};"
+            "Encrypt=yes;"
+            "TrustServerCertificate=yes;"
+            "MARS_Connection=yes;"
+            "Pooling=no;",
+            timeout=30,
+        )
+
+        print("=" * 80)
+        print("Database Connected Successfully")
+
+        return conn, conn.cursor()
+
+    except Exception as e:
+        print("=" * 80)
+        print("Database Connection Failed")
+        raise Exception(f"Unable to connect to SQL Server: {e}")
+def cleanup(cursor, conn, provider_id, job_id):
 
     print("=" * 80)
     print("Deleting Existing Data...")
 
+    # Delete CertificationRequestResults
     cursor.execute("""
-    DELETE FROM CertificationRequestResults
-    WHERE CertificationId IN
-    (
-        SELECT Id
-        FROM Certifications
+        DELETE FROM CertificationRequestResults
+        WHERE CertificationId IN
+        (
+            SELECT Id
+            FROM Certifications
+            WHERE ProviderId = ?
+        )
+    """, provider_id)
+
+    # Delete Certifications
+    cursor.execute("""
+        DELETE FROM Certifications
         WHERE ProviderId = ?
-    )
     """, provider_id)
 
+    # Delete Job Logs
     cursor.execute("""
-    DELETE FROM Certifications
-    WHERE ProviderId = ?
-    """, provider_id)
-
-    cursor.execute("""
-    DELETE FROM CertificationProviderJobLogs
-    WHERE CertificationProviderJobId = ?
+        DELETE FROM CertificationProviderJobLogs
+        WHERE CertificationProviderJobId = ?
     """, job_id)
 
     conn.commit()
 
-    print("Cleanup Completed")
-
-    # ==========================================
-    # UPDATE FREQUENCY TO 5
-    # ==========================================
-
+    print("Cleanup Completed")    
+def update_frequency(cursor, conn, job_id, frequency):
     cursor.execute("""
-    UPDATE CertificationProviderJobs
-    SET Frequency = 5
-    WHERE Id = ?
-    """, job_id)
+        UPDATE CertificationProviderJobs
+        SET Frequency = ?
+        WHERE Id = ?
+    """, frequency, job_id)
 
     conn.commit()
 
-    print("Frequency Updated To 5")
+    print(f"Frequency updated to {frequency}")
 
-    # ==========================================
-    # WAIT FOR SUCCESS = 3 THEN 1
-    # ==========================================
+def wait_for_job(conn, job_id):
 
     print("=" * 80)
-    print("Waiting For Job Execution...")
+    print("Waiting for ETL job...")
 
-    found_3 = False
+    started = False
 
     while True:
 
-        logs_df = pd.read_sql("""
-        SELECT TOP 10 *
-        FROM CertificationProviderJobLogs
-        WHERE CertificationProviderJobId = ?
-        ORDER BY Id DESC
+        df = pd.read_sql("""
+            SELECT TOP 1
+                Id,
+                Success
+            FROM CertificationProviderJobLogs
+            WHERE CertificationProviderJobId = ?
+            ORDER BY Id DESC
         """, conn, params=[job_id])
 
-        if logs_df.empty:
-            print("No logs yet...")
+        if df.empty:
+            print("Logs not processed in DB yet. Waiting...")
             time.sleep(10)
             continue
 
-        success_values = logs_df["Success"].tolist()
+        success = int(df.iloc[0]["Success"])
 
-        print("Current Success Values:", success_values)
+        print("Success =", success)
 
-        # First wait for 3
+        if success == 3:
+            started = True
+            print("Job Started...")
 
-        if not found_3 and 3 in success_values:
-            found_3 = True
-            print("SUCCESS = 3 FOUND")
+        elif started and success == 1:
+            print("Job Completed.")
+            return
 
-        # Then wait for 1
-
-        if found_3 and 1 in success_values:
-            print("SUCCESS = 1 FOUND")
-            print("Job Completed")
-            break
+        elif started and success == 2:
+            raise Exception("ETL Job Failed.")
 
         time.sleep(10)
-
-    # ==========================================
-    # PRINT LAST 2 LOG ROWS
-    # ==========================================
-
-    latest_logs = pd.read_sql("""
-    SELECT TOP 2 *
-    FROM CertificationProviderJobLogs
-    WHERE CertificationProviderJobId = ?
-    ORDER BY Id DESC
-    """, conn, params=[job_id])
+def wait_for_data(conn, provider_id):
 
     print("=" * 80)
-    print("LATEST 2 LOG RECORDS")
-    print(latest_logs)
+    print("Waiting for Certification data...")
 
-    # ==========================================
-    # VERIFY CERTIFICATION DATA
-    # ==========================================
+    while True:
+
+        cert_df = pd.read_sql("""
+            SELECT *
+            FROM Certifications
+            WHERE ProviderId = ?
+            ORDER BY Id DESC
+        """, conn, params=[provider_id])
+
+        if not cert_df.empty:
+            print(f"Downloaded Records: {len(cert_df)}")
+            return cert_df
+
+        print("No certification data found. Waiting...")
+        time.sleep(10)
+
+def get_logs(conn, job_id):
+
+
+    return pd.read_sql("""
+        SELECT TOP 2 *
+        FROM CertificationProviderJobLogs
+        WHERE CertificationProviderJobId = ?
+        ORDER BY Id DESC
+    """, conn, params=[job_id])
+
+def get_certifications(conn, provider_id):
 
     cert_df = pd.read_sql("""
-    SELECT *
-    FROM Certifications
-    WHERE ProviderId = ?
-    ORDER BY Id DESC
+        SELECT *
+        FROM Certifications
+        WHERE ProviderId = ?
+        ORDER BY Id DESC
     """, conn, params=[provider_id])
 
     print("=" * 80)
     print(f"TOTAL ROWS DOWNLOADED : {len(cert_df)}")
 
-    # Print first 2 downloaded records
-
     print("=" * 80)
     print("TOP 2 CERTIFICATION RECORDS")
-
     print(cert_df.head(2))
 
-    # ==========================================
-    # RESET FREQUENCY TO 6
-    # ==========================================
+    return cert_df
 
-    cursor.execute("""
-    UPDATE CertificationProviderJobs
-    SET Frequency = 6
-    WHERE Id = ?
-    """, job_id)
+def generate_report(provider_name, procedure_name,
+                    provider_id, job_id,
+                    cert_df,
+                    status,
+                    error_message,
+                    execution_time):
 
-    conn.commit()
+    os.makedirs("Reports", exist_ok=True)
 
-    print("=" * 80)
-    print("Frequency Reset To 6")
+    report = os.path.join(
+        "Reports",
+        f"Execution_Report_{datetime.now():%Y%m%d_%H%M%S}.html"
+    )
 
-    # ==========================================
-    # CLOSE CONNECTION
-    # ==========================================
+    records = len(cert_df)
 
-    cursor.close()
-    conn.close()
+    color = "green" if status == "PASS" else "red"
 
-    print("=" * 80)
-    print("EXECUTION COMPLETED SUCCESSFULLY")
+    html = f"""
+    <html>
+    <body style='font-family:Arial'>
+    <h2>Atlas ETL Execution Report</h2>
+    <table border=1 cellpadding=8 cellspacing=0>
+    <tr><th>Item</th><th>Value</th></tr>
+    <tr><td>Status</td><td style='color:{color}'>{status}</td></tr>
+    <tr><td>Provider</td><td>{provider_name}</td></tr>
+    <tr><td>Procedure</td><td>{procedure_name}</td></tr>
+    <tr><td>Provider ID</td><td>{provider_id}</td></tr>
+    <tr><td>Job ID</td><td>{job_id}</td></tr>
+    <tr><td>Total Records</td><td>{records}</td></tr>
+    <tr><td>Execution Time</td><td>{execution_time} sec</td></tr>
+    <tr><td>Error</td><td>{error_message or "None"}</td></tr>
+    </table>
+    </body>
+    </html>
+    """
 
-except Exception as e:
-    status="FAIL"
-    error_message=str(e)
-    traceback.print_exc()
+    with open(report, "w", encoding="utf-8") as f:
+        f.write(html)
 
-finally:
-    execution_time = round(time.time() - start_time, 2)
+    webbrowser.open(os.path.abspath(report))
+
+
+def main():
+    global status, error_message, provider_id, job_id, cert_df
+
+    start = time.time()
+
+    conn = None
+    cursor = None
 
     try:
-        os.makedirs("Reports", exist_ok=True)
+        conn, cursor = connect_database()
 
-        report = os.path.join(
-            "Reports",
-            f"Execution_Report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
-        )
+        provider_id, provider_df = get_provider(conn, PROVIDER_NAME)
+        print(provider_df)
 
-        records = len(cert_df) if not cert_df.empty else 0
+        job_id, job_df = get_job(conn, PROCEDURE_NAME)
+        print(job_df.head())
 
-        color = "green" if status == "PASS" else "red"
-        icon = "PASS ✅" if status == "PASS" else "FAIL ❌"
+        cleanup(cursor, conn, provider_id, job_id)
+        print("Cleanup completed")
 
-        html = f"""
-                <html>
-                <head>
-                    <title>Atlas ETL Execution Report</title>
-                </head>
-                <body style="font-family:Arial">
+        update_frequency(cursor, conn, job_id, 5)
+        print("Frequency updated to 5")
 
-                <h2>Atlas ETL Execution Summary</h2>
+        wait_for_job(conn, job_id)
 
-                <table border="1" cellspacing="0" cellpadding="8">
-                <tr><th>Item</th><th>Value</th></tr>
+        wait_for_data(conn, provider_id)
 
-                <tr><td>Status</td><td style="color:{color}"><b>{icon}</b></td></tr>
-                <tr><td>Provider</td><td>{provider_name}</td></tr>
-                <tr><td>Procedure</td><td>{procedure_name}</td></tr>
-                <tr><td>Provider ID</td><td>{provider_id}</td></tr>
-                <tr><td>Job ID</td><td>{job_id}</td></tr>
-                <tr><td>Total Records</td><td>{records}</td></tr>
-                <tr><td>Execution Time</td><td>{execution_time} sec</td></tr>
-                <tr><td>Error</td><td>{error_message or "None"}</td></tr>
+        print(get_logs(conn, job_id))
 
-                </table>
+        cert_df = get_certifications(conn, provider_id)
 
-                </body>
-                </html>
-                """
+        print(cert_df.head(2))
 
-        with open(report, "w", encoding="utf-8") as f:
-            f.write(html)
-
-        print("Report created:", os.path.abspath(report))
-        webbrowser.open(os.path.abspath(report))
+        update_frequency(cursor, conn, job_id, 6)
+        print("Frequency reset to 6")
 
     except Exception as e:
-        print("Report generation failed:", e)
+        status = "FAIL"
+        error_message = str(e)
         traceback.print_exc()
 
-    try:
-        cursor.close()
-    except:
-        pass
+    finally:
 
-    try:
-        conn.close()
-    except:
-        pass
+        if cursor:
+            cursor.close()
+
+        if conn:
+            conn.close()
+
+        generate_report(
+            PROVIDER_NAME,
+            PROCEDURE_NAME,
+            provider_id,
+            job_id,
+            cert_df,
+            status,
+            error_message,
+            round(time.time() - start, 2),
+        )
+
+
+if __name__ == "__main__":
+    main()
