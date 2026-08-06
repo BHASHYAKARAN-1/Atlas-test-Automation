@@ -19,8 +19,8 @@ PASSWORD = "!atlas!!*;"
 
 
 
-PROVIDER_NAME = "New Hampshire: Exclusions"
-PROCEDURE_NAME = "NewHampshireExclusions"
+PROVIDER_NAME = "Maine: Exclusions"
+PROCEDURE_NAME = "MaineExclusions"
 
 # provider_name = "FDA Debarment"
 # procedure_name = "FDADebarment"
@@ -140,14 +140,10 @@ def wait_for_job(conn, job_id):
     print("=" * 80)
     print("Waiting for ETL job...")
 
-    started = False
-
     while True:
 
         df = pd.read_sql("""
-            SELECT TOP 1
-                Id,
-                Success
+            SELECT Success
             FROM CertificationProviderJobLogs
             WHERE CertificationProviderJobId = ?
             ORDER BY Id DESC
@@ -158,28 +154,26 @@ def wait_for_job(conn, job_id):
             time.sleep(10)
             continue
 
-        success = int(df.iloc[0]["Success"])
+        statuses = df["Success"].tolist()
+        print("Current Statuses:", statuses)
 
-        print("Success =", success)
-
-        if success == 3:
-            started = True
+        if 3 in statuses:
             print("Job Started...")
 
-        elif started and success == 1:
-            print("Job Completed.")
+        if any(x in (1, 2) for x in statuses):
+            print("File downloaded in server.")
+            print("Job Completed Successfully.")
             return
 
-        elif started and success == 2:
-            raise Exception("ETL Job Failed.")
-
         time.sleep(10)
-def wait_for_data(conn, provider_id):
 
+def wait_for_data(conn, provider_id, timeout=300):
     print("=" * 80)
     print("Waiting for Certification data...")
 
-    while True:
+    start_time = time.time()
+
+    while time.time() - start_time < timeout:
 
         cert_df = pd.read_sql("""
             SELECT *
@@ -189,21 +183,34 @@ def wait_for_data(conn, provider_id):
         """, conn, params=[provider_id])
 
         if not cert_df.empty:
-            print(f"Downloaded Records: {len(cert_df)}")
+            print("=" * 80)
+            print(f"TOTAL ROWS DOWNLOADED: {len(cert_df)}")
+            print(cert_df.head(2))
             return cert_df
 
-        print("No certification data found. Waiting...")
+        elapsed = int(time.time() - start_time)
+        print(f"File not processed yet. Waited {elapsed}s/{timeout}s...")
         time.sleep(10)
 
+    raise TimeoutError(f"No certification data found after {timeout} seconds.")
+
 def get_logs(conn, job_id):
+    while True:
+        logs_df = pd.read_sql("""
+            SELECT TOP 2 *
+            FROM CertificationProviderJobLogs
+            WHERE CertificationProviderJobId = ?
+            ORDER BY Id DESC
+        """, conn, params=[job_id])
 
+        if not logs_df.empty:
+            print("=" * 80)
+            print(f"Found {len(logs_df)} log(s).")
+            print(logs_df)
+            return logs_df
 
-    return pd.read_sql("""
-        SELECT TOP 2 *
-        FROM CertificationProviderJobLogs
-        WHERE CertificationProviderJobId = ?
-        ORDER BY Id DESC
-    """, conn, params=[job_id])
+        print("No logs found yet. Waiting 30 seconds...")
+        time.sleep(30)
 
 def get_certifications(conn, provider_id):
 
