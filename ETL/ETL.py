@@ -29,11 +29,12 @@ PASSWORD = "!atlas!!*;"
 # PROCEDURE_NAME = "MaineExclusions"
 
 
-PROVIDER_NAME = "SAM: Exclusions"
-PROCEDURE_NAME = "SAMImport"
+#PROVIDER_NAME = "SAM: Exclusions"
+#PROCEDURE_NAME = "SAMImport"
 
 
-
+ provider_name = "FDA Debarment"
+procedure_name = "FDADebarment"
 
 status = "PASS"
 error_message = ""
