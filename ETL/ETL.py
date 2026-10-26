@@ -17,13 +17,22 @@ DATABASE = "Atlas"
 USERNAME = "atlas;"
 PASSWORD = "!atlas!!*;"
 
+# SERVER = "tcp:184.33.25.205,1433"
+# DATABASE = "Atlas"
+# USERNAME = "engine;"
+# PASSWORD = "UtORVqu7WDLNJ*"
 
 
-PROVIDER_NAME = "Maine: Exclusions"
-PROCEDURE_NAME = "MaineExclusions"
 
-# provider_name = "FDA Debarment"
-# procedure_name = "FDADebarment"
+
+# PROVIDER_NAME = "Maine: Exclusions"
+# PROCEDURE_NAME = "MaineExclusions"
+
+
+PROVIDER_NAME = "SAM: Exclusions"
+PROCEDURE_NAME = "SAMImport"
+
+
 
 
 status = "PASS"
@@ -37,6 +46,7 @@ cert_df = pd.DataFrame()
 # DATABASE
 # ==========================================================
 def get_provider(conn, provider_name):
+    
 
     provider_df = pd.read_sql("""
         SELECT TOP 1
@@ -136,7 +146,7 @@ def update_frequency(cursor, conn, job_id, frequency):
     print(f"Frequency updated to {frequency}")
 
 def wait_for_job(conn, job_id):
-
+    time.sleep(10)
     print("=" * 80)
     print("Waiting for ETL job...")
 
@@ -174,35 +184,45 @@ def wait_for_data(conn, provider_id, timeout=300):
     start_time = time.time()
 
     while time.time() - start_time < timeout:
+        cursor = conn.cursor()
 
-        cert_df = pd.read_sql("""
-            SELECT *
-            FROM Certifications
-            WHERE ProviderId = ?
-            ORDER BY Id DESC
-        """, conn, params=[provider_id])
+        try:
+            cursor.execute("""
+                SELECT COUNT(*)
+                FROM Certifications
+                WHERE ProviderId = ?
+            """, provider_id)
 
-        if not cert_df.empty:
+            total_count = cursor.fetchone()[0]
+
+        finally:
+            cursor.close()
+
+        if total_count > 0:
             print("=" * 80)
-            print(f"TOTAL ROWS DOWNLOADED: {len(cert_df)}")
-            print(cert_df.head(2))
-            return cert_df
+            print(f"TOTAL CERTIFICATION RECORDS: {total_count}")
+            print("Certification data is available.")
+            return total_count
 
         elapsed = int(time.time() - start_time)
-        print(f"File not processed yet. Waited {elapsed}s/{timeout}s...")
-        time.sleep(10)
+        print(f"No certification data yet. Waited {elapsed}s/{timeout}s...")
+        time.sleep(5)
 
-    raise TimeoutError(f"No certification data found after {timeout} seconds.")
+    raise TimeoutError(
+        f"No certification data found for provider {provider_id} "
+        f"after {timeout} seconds."
+    )
 
 def get_logs(conn, job_id):
     while True:
+        time.sleep(15)
         logs_df = pd.read_sql("""
             SELECT TOP 2 *
             FROM CertificationProviderJobLogs
             WHERE CertificationProviderJobId = ?
             ORDER BY Id DESC
         """, conn, params=[job_id])
-
+       
         if not logs_df.empty:
             print("=" * 80)
             print(f"Found {len(logs_df)} log(s).")
@@ -213,22 +233,42 @@ def get_logs(conn, job_id):
         time.sleep(30)
 
 def get_certifications(conn, provider_id):
-
-    cert_df = pd.read_sql("""
-        SELECT *
-        FROM Certifications
-        WHERE ProviderId = ?
-        ORDER BY Id DESC
-    """, conn, params=[provider_id])
-
     print("=" * 80)
-    print(f"TOTAL ROWS DOWNLOADED : {len(cert_df)}")
+    print("Fetching final Certification count...")
 
-    print("=" * 80)
-    print("TOP 2 CERTIFICATION RECORDS")
-    print(cert_df.head(2))
+    cursor = conn.cursor()
 
-    return cert_df
+    try:
+        # Get total count
+        cursor.execute("""
+            SELECT COUNT(*)
+            FROM Certifications
+            WHERE ProviderId = ?
+        """, provider_id)
+
+        total_count = cursor.fetchone()[0]
+
+        # Get first 2 records
+        cursor.execute("""
+            SELECT TOP 2 *
+            FROM Certifications
+            WHERE ProviderId = ?
+            ORDER BY Id DESC
+        """, provider_id)
+
+        rows = cursor.fetchall()
+        columns = [column[0] for column in cursor.description]
+
+        cert_df = pd.DataFrame.from_records(rows, columns=columns)
+
+        print(f"TOTAL CERTIFICATION RECORDS: {total_count}")
+        print("TOP 2 CERTIFICATION RECORDS:")
+        print(cert_df)
+
+        return total_count, cert_df
+
+    finally:
+        cursor.close()
 
 def generate_report(provider_name, procedure_name,
                     provider_id, job_id,
@@ -244,7 +284,7 @@ def generate_report(provider_name, procedure_name,
         f"Execution_Report_{datetime.now():%Y%m%d_%H%M%S}.html"
     )
 
-    records = len(cert_df)
+    records = cert_df.attrs.get("total_count", len(cert_df))
 
     color = "green" if status == "PASS" else "red"
 
@@ -272,7 +312,6 @@ def generate_report(provider_name, procedure_name,
 
     webbrowser.open(os.path.abspath(report))
 
-
 def main():
     global status, error_message, provider_id, job_id, cert_df
 
@@ -282,32 +321,52 @@ def main():
     cursor = None
 
     try:
+        # Connect to database
         conn, cursor = connect_database()
 
+        # Get provider details
         provider_id, provider_df = get_provider(conn, PROVIDER_NAME)
         print(provider_df)
 
+        # Get job details
         job_id, job_df = get_job(conn, PROCEDURE_NAME)
         print(job_df.head())
 
+        # Cleanup existing data and logs
         cleanup(cursor, conn, provider_id, job_id)
         print("Cleanup completed")
 
+        # Update frequency to trigger ETL
         update_frequency(cursor, conn, job_id, 5)
         print("Frequency updated to 5")
 
+        # Wait for ETL job completion
         wait_for_job(conn, job_id)
 
-        wait_for_data(conn, provider_id)
+        # Wait for certification data
+        data_count = wait_for_data(conn, provider_id)
+        print(f"Certification count confirmed: {data_count}")
 
-        print(get_logs(conn, job_id))
+        # Fetch job logs
+        logs_df = get_logs(conn, job_id)
+        print(logs_df)
 
-        cert_df = get_certifications(conn, provider_id)
+        # Get total certification count and first 2 records
+        cert_count, cert_df = get_certifications(conn, provider_id)
 
+        # Preserve total count for HTML report
+        cert_df.attrs["total_count"] = cert_count
+
+        print("=" * 80)
+        print(f"TOTAL CERTIFICATION RECORDS: {cert_count}")
+        print("FIRST 2 CERTIFICATION RECORDS:")
         print(cert_df.head(2))
 
+        # Reset frequency
         update_frequency(cursor, conn, job_id, 6)
         print("Frequency reset to 6")
+
+        status = "PASS"
 
     except Exception as e:
         status = "FAIL"
@@ -315,7 +374,6 @@ def main():
         traceback.print_exc()
 
     finally:
-
         if cursor:
             cursor.close()
 
@@ -336,3 +394,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
