@@ -25,23 +25,21 @@ PASSWORD = "!atlas!!*;"
 
 
 
-# PROVIDER_NAME = "Maine: Exclusions"
-# PROCEDURE_NAME = "MaineExclusions"
+PROVIDER_NAME = "Maine: Exclusions"
+PROCEDURE_NAME = "MaineExclusions"
 
 
 #PROVIDER_NAME = "SAM: Exclusions"
-#PROCEDURE_NAME = "SAMImport"
+#PROCEDURE_NAME = "WashingtonMedicaidExclusions"
 
 
- provider_name = "FDA Debarment"
-procedure_name = "FDADebarment"
+
 
 status = "PASS"
 error_message = ""
 provider_id = "N/A"
 job_id = "N/A"
 cert_df = pd.DataFrame()
-
 
 # ==========================================================
 # DATABASE
@@ -209,9 +207,11 @@ def wait_for_data(conn, provider_id, timeout=300):
         print(f"No certification data yet. Waited {elapsed}s/{timeout}s...")
         time.sleep(5)
 
+
     raise TimeoutError(
         f"No certification data found for provider {provider_id} "
-        f"after {timeout} seconds."
+        f"after {timeout} seconds. "
+        f"FAIL: Data not extracted to DB."
     )
 
 def get_logs(conn, job_id):
@@ -376,22 +376,38 @@ def main():
 
     finally:
         if cursor:
-            cursor.close()
+            try:
+                cursor.close()
+            except Exception as e:
+                print(f"Cursor close error: {e}")
 
         if conn:
-            conn.close()
+            try:
+                conn.close()
+            except Exception as e:
+                print(f"Database close error: {e}")
 
-        generate_report(
-            PROVIDER_NAME,
-            PROCEDURE_NAME,
-            provider_id,
-            job_id,
-            cert_df,
-            status,
-            error_message,
-            round(time.time() - start, 2),
-        )
+        try:
+            print("=" * 80)
+            print("Generating execution report...")
 
+            generate_report(
+                PROVIDER_NAME,
+                PROCEDURE_NAME,
+                provider_id,
+                job_id,
+                cert_df,
+                status,
+                error_message,
+                round(time.time() - start, 2),
+            )
+
+            print("Report generated successfully.")
+            print("Check the Reports folder.")
+
+        except Exception as e:
+            print(f"Failed to generate report: {e}")
+            traceback.print_exc()
 
 if __name__ == "__main__":
     main()
