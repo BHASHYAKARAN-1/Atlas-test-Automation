@@ -317,7 +317,6 @@ def main():
     global status, error_message, provider_id, job_id, cert_df
 
     start = time.time()
-
     conn = None
     cursor = None
 
@@ -363,10 +362,6 @@ def main():
         print("FIRST 2 CERTIFICATION RECORDS:")
         print(cert_df.head(2))
 
-        # Reset frequency
-        update_frequency(cursor, conn, job_id, 6)
-        print("Frequency reset to 6")
-
         status = "PASS"
 
     except Exception as e:
@@ -375,18 +370,38 @@ def main():
         traceback.print_exc()
 
     finally:
+        # Always attempt to reset frequency to 6
+        if conn is not None and job_id != "N/A":
+            try:
+                reset_cursor = conn.cursor()
+                try:
+                    update_frequency(reset_cursor, conn, job_id, 6)
+                    print("Frequency reset to 6")
+                finally:
+                    reset_cursor.close()
+
+            except Exception as e:
+                print(f"ERROR: Failed to reset frequency to 6: {e}")
+                status = "FAIL"
+                error_message += (
+                    f"\nFailed to reset frequency to 6: {e}"
+                )
+
+        # Close original cursor
         if cursor:
             try:
                 cursor.close()
             except Exception as e:
                 print(f"Cursor close error: {e}")
 
+        # Close database connection
         if conn:
             try:
                 conn.close()
             except Exception as e:
                 print(f"Database close error: {e}")
 
+        # Generate execution report
         try:
             print("=" * 80)
             print("Generating execution report...")
@@ -409,6 +424,6 @@ def main():
             print(f"Failed to generate report: {e}")
             traceback.print_exc()
 
+
 if __name__ == "__main__":
     main()
-
